@@ -3,22 +3,27 @@ r"""Export logged XML payloads from SAP PO. Requires Python 3.10+, no packages.
 
 Example (PowerShell; replace the placeholders):
   python .\sap_po_download.py --url "https://YOUR-HOST:50001" `
-    --interface "YOUR_INTERFACE" --namespace "urn:your:namespace" `
+    --scenario-name "YOUR_ICO_NAME" `
     --from "2026-11-17T09:00:00+01:00" --to "2026-11-17T10:00:00+01:00"
 
 Username/password are prompted locally. For unattended use, pass --output and set
 SAP_PO_USERNAME and SAP_PO_PASSWORD using your secret-management tool.
 Use --ca-file company-ca.pem if your PO certificate uses a private CA.
 
-Only online, retained logged versions are exported, not staged/archived messages.
-All log locations returned by PO are requested; XML MIME parts are saved without
-reformatting. XI control envelopes and non-XML parts are not exported.
-Use --interface-field senderInterface or receiverInterface to qualify the filter,
-or --scenario-id with a technical scenario ID instead of an interface.
+The exact ICO name is resolved to its ID using getIntegrationFlows. Use
+--scenario-id instead to search by a known technical ID without the lookup.
+Only the first nonempty log location returned by PO is downloaded per matching
+message. Request and response XML are exported if present in the selected
+versions; the downloader does not fetch later versions or pair messages.
+XML parts are saved without reformatting; XI control envelopes and non-XML parts
+are not exported. Staged and archived messages are not downloaded.
 Searches reaching --limit (default 100) stop before downloading: narrow the time
 range or explicitly increase the limit. There is no automatic pagination.
 When --output is omitted, enter a folder path or press Enter to use .\payloads.
-XML files are saved directly there. Existing files are never overwritten.
+XML files are saved directly there as ScenarioName_yyyymmdd_hhmmss.xml,
+using the message's SAP PO startTime as returned, without timezone conversion.
+With --scenario-id, the ID is used in place of the name. If startTime is missing
+or invalid, the filename uses unknown-start. Collisions receive a numeric suffix.
 Use an access-controlled folder with an appropriate retention policy.
 Exit codes: 0 = success/no matches, 1 = failed or incomplete, 2 = invalid arguments.
 """
@@ -30,7 +35,6 @@ from datetime import datetime
 from email import policy
 from email.parser import BytesParser
 import getpass
-import hashlib
 import os
 from pathlib import Path
 import re
@@ -44,7 +48,6 @@ import xml.etree.ElementTree as ET
 SOAP = "http://schemas.xmlsoap.org/soap/envelope/"
 OP = "urn:AdapterMessageMonitoringVi"
 DATA = "urn:com.sap.aii.mdt.server.adapterframework.ws"
-ATTR = "urn:com.sap.aii.mdt.api.data"
 JAVA = "urn:java/lang"
 XI = "http://sap.com/xi/XI/Message/30"
 XSI = "http://www.w3.org/2001/XMLSchema-instance"
@@ -123,29 +126,39 @@ class Monitoring:
             raise DownloadError(f"{operation}: empty or unexpected SOAP response.")
         return result
 
+    def resolve_scenario_id(self, name):
+        root, operation = envelope("getIntegrationFlows")
+        element(operation, OP, "language", "en")
+        result = self.call("getIntegrationFlows", root)
+        matching_ids = {
+            (flow.findtext(f"{{{DATA}}}id") or "").strip()
+            for flow in result.findall(f"{{{DATA}}}IntegrationFlow")
+            if flow.findtext(f"{{{DATA}}}name") == name
+        }
+        if not matching_ids:
+            raise DownloadError(f"No integration flow named {name!r}. Use the exact ICO name returned by SAP PO.")
+        if len(matching_ids) > 1:
+            raise DownloadError(f"Integration flow name {name!r} is ambiguous. Use --scenario-id.")
+        scenario_id = matching_ids.pop()
+        if not scenario_id:
+            raise DownloadError(f"SAP PO returned no technical ID for integration flow {name!r}.")
+        return scenario_id
+
     def search(self, args):
         root, operation = envelope("getMessageList")
         filters = element(operation, OP, "filter")
         # AdapterFilter has an ordered XSD sequence, including required scalars.
         values = [
             ("archive", "false"), ("dateType", "0"),
-            ("fromTime", args.start.isoformat()), ("interface", None),
+            ("fromTime", args.start.isoformat()),
             ("nodeId", "0"), ("onlyFaultyMessages", "false"),
-            ("receiverInterface", None), ("retries", "0"), ("retryInterval", "0"),
-            ("senderInterface", None), ("timesFailed", "0"),
+            ("retries", "0"), ("retryInterval", "0"), ("timesFailed", "0"),
             ("toTime", args.end.isoformat()), ("wasEdited", "false"),
         ]
         for name, value in values:
-            if name in ("interface", "senderInterface", "receiverInterface"):
-                if args.interface and name == args.interface_field:
-                    interface = element(filters, DATA, name)
-                    element(interface, ATTR, "name", args.interface)
-                    element(interface, ATTR, "namespace", args.namespace)
-            else:
-                element(filters, DATA, name, value)
-        if args.scenario_id:
-            scenario = element(filters, DATA, "scenarioIDs")
-            element(scenario, JAVA, "String", args.scenario_id)
+            element(filters, DATA, name, value)
+        scenario = element(filters, DATA, "scenarioIDs")
+        element(scenario, JAVA, "String", args.scenario_id)
         element(filters, DATA, "returnLogLocations", "true")
         element(filters, DATA, "onlyLogLocationsWithPayload", "true")
         element(operation, OP, "maxMessages", args.limit)
@@ -242,9 +255,12 @@ def timestamp(value):
     return result
 
 
-def label(value):
-    text = re.sub(r"[^A-Za-z0-9_-]", "_", value)[:55] or "payload"
-    return text + "_" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+def scenario_filename_stem(scenario_name):
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", scenario_name)[:120].strip(" .")
+    if re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9\u00b9\u00b2\u00b3]",
+                    stem.split(".", 1)[0].rstrip(), re.IGNORECASE):
+        stem = "_" + stem
+    return stem or "scenario"
 
 
 def choose_output(output):
@@ -279,28 +295,35 @@ def export(client, args):
         return 0
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
+    scenario_stem = scenario_filename_stem(args.scenario_name or args.scenario_id)
     failed, saved = 0, 0
     for message in messages:
         key = message.findtext(f"{{{DATA}}}messageKey")
-        versions = list(dict.fromkeys(
+        version = next((
             item.text for item in message.findall(f"./{{{DATA}}}logLocations/{{{JAVA}}}String")
-            if item.text
-        ))
-        if not key or not versions:
+            if item.text and item.text.strip()
+        ), None)
+        if not key or not version:
             print(f"ERROR: message {key or '(no key)'} has no key/logged payload locations.", file=sys.stderr)
             failed += 1
             continue
-        message_label = label(key)
-        for version in versions:
+        try:
+            payloads = xml_payloads(client.logged_bytes(key, version))
+            start_time = message.findtext(f"{{{DATA}}}startTime", "").strip()
             try:
-                payloads = xml_payloads(client.logged_bytes(key, version))
-                for index, content in enumerate(payloads, 1):
-                    save_xml(output, f"{message_label}_{label(version)}_{index:02}", content)
-                    saved += 1
-                print(f"{key} | {version}: saved {len(payloads)} XML part(s).")
-            except (DownloadError, OSError, URLError, TimeoutError) as exc:
-                print(f"ERROR: {key} | {version}: {exc}", file=sys.stderr)
-                failed += 1
+                date = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                stamp = f"{date.year:04d}{date:%m%d_%H%M%S}"
+            except ValueError:
+                print(f"WARNING: {key} has no valid startTime; using unknown-start.", file=sys.stderr)
+                stamp = "unknown-start"
+            stem = f"{scenario_stem}_{stamp}"
+            for content in payloads:
+                save_xml(output, stem, content)
+                saved += 1
+            print(f"{key} | {version}: saved {len(payloads)} XML part(s).")
+        except (DownloadError, OSError, URLError, TimeoutError) as exc:
+            print(f"ERROR: {key} | {version}: {exc}", file=sys.stderr)
+            failed += 1
     print(f"Saved {saved} XML file(s) to {output.resolve()}; failed items: {failed}.")
     return 1 if failed else 0
 
@@ -309,11 +332,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", required=True, help="HTTPS base URL or direct HTTPS SOAP endpoint.")
     selector = parser.add_mutually_exclusive_group(required=True)
-    selector.add_argument("--interface", help="Exact technical interface name from Message Monitor.")
-    selector.add_argument("--scenario-id", help="Technical scenario ID, not a display name.")
-    parser.add_argument("--namespace", help="Exact interface namespace.")
-    parser.add_argument("--interface-field", default="interface",
-                        choices=("interface", "senderInterface", "receiverInterface"))
+    selector.add_argument("--scenario-name", help="Exact ICO name returned by SAP PO getIntegrationFlows.")
+    selector.add_argument("--scenario-id", help="Search directly by technical scenario identifier.")
     parser.add_argument("--from", dest="start", required=True, type=timestamp)
     parser.add_argument("--to", dest="end", required=True, type=timestamp)
     parser.add_argument("--username", default=os.environ.get("SAP_PO_USERNAME"))
@@ -324,8 +344,10 @@ def main():
     url = urlsplit(args.url)
     if url.scheme != "https" or not url.hostname or url.username or url.password or url.fragment:
         parser.error("--url must be an HTTPS URL without embedded credentials or fragments.")
-    if args.interface and not args.namespace:
-        parser.error("--namespace is required with --interface.")
+    if args.scenario_name is not None and not args.scenario_name.strip():
+        parser.error("--scenario-name must not be empty.")
+    if args.scenario_id is not None and not args.scenario_id.strip():
+        parser.error("--scenario-id must not be empty.")
     if args.end <= args.start or args.limit < 1:
         parser.error("--to must be later than --from, and --limit must be positive.")
     if url.path in ("", "/"):
@@ -338,7 +360,11 @@ def main():
         password = os.environ.get("SAP_PO_PASSWORD") or getpass.getpass("SAP PO password: ")
         if not username or ":" in username or not password:
             parser.error("Provide a username without ':' and a nonempty password.")
-        return export(Monitoring(args.url, username, password, args.ca_file), args)
+        client = Monitoring(args.url, username, password, args.ca_file)
+        if args.scenario_name is not None:
+            args.scenario_id = client.resolve_scenario_id(args.scenario_name)
+            print(f"Resolved {args.scenario_name!r} to scenario ID {args.scenario_id}.")
+        return export(client, args)
     except (DownloadError, OSError, URLError, TimeoutError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
