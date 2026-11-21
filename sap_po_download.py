@@ -6,8 +6,8 @@ Example (PowerShell; replace the placeholders):
     --interface "YOUR_INTERFACE" --namespace "urn:your:namespace" `
     --from "2026-11-17T09:00:00+01:00" --to "2026-11-17T10:00:00+01:00"
 
-Username/password are prompted locally. For unattended use, set SAP_PO_USERNAME
-and SAP_PO_PASSWORD in the process environment using your secret-management tool.
+Username/password are prompted locally. For unattended use, pass --output and set
+SAP_PO_USERNAME and SAP_PO_PASSWORD using your secret-management tool.
 Use --ca-file company-ca.pem if your PO certificate uses a private CA.
 
 Only online, retained logged versions are exported, not staged/archived messages.
@@ -17,15 +17,16 @@ Use --interface-field senderInterface or receiverInterface to qualify the filter
 or --scenario-id with a technical scenario ID instead of an interface.
 Searches reaching --limit (default 100) stop before downloading: narrow the time
 range or explicitly increase the limit. There is no automatic pagination.
-Each run creates a separate output directory. Output may contain sensitive data;
-use an access-controlled folder with an appropriate retention policy.
+When --output is omitted, enter a folder path or press Enter to use .\payloads.
+XML files are saved directly there. Existing files are never overwritten.
+Use an access-controlled folder with an appropriate retention policy.
 Exit codes: 0 = success/no matches, 1 = failed or incomplete, 2 = invalid arguments.
 """
 
 import argparse
 import base64
 import binascii
-from datetime import datetime, timezone
+from datetime import datetime
 from email import policy
 from email.parser import BytesParser
 import getpass
@@ -246,13 +247,38 @@ def label(value):
     return text + "_" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
+def choose_output(output):
+    if output is not None:
+        return output
+    try:
+        path = input(r"Folder for XML files (Enter for .\payloads): ").strip()
+    except EOFError as exc:
+        raise DownloadError("No output folder selected. Pass --output for unattended runs.") from exc
+    return Path(path.strip('"')).expanduser() if path else Path("payloads")
+
+
+def save_xml(output, stem, content):
+    suffix = ""
+    number = 1
+    while True:
+        try:
+            handle = (output / f"{stem}{suffix}.xml").open("xb")
+        except FileExistsError:
+            number += 1
+            suffix = f"_{number}"
+            continue
+        with handle:
+            handle.write(content)
+        return
+
+
 def export(client, args):
     messages = client.search(args)
     print(f"Found {len(messages)} message(s).")
     if not messages:
         return 0
-    output = args.output / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    output.mkdir(parents=True, exist_ok=False)
+    output = args.output
+    output.mkdir(parents=True, exist_ok=True)
     failed, saved = 0, 0
     for message in messages:
         key = message.findtext(f"{{{DATA}}}messageKey")
@@ -264,15 +290,12 @@ def export(client, args):
             print(f"ERROR: message {key or '(no key)'} has no key/logged payload locations.", file=sys.stderr)
             failed += 1
             continue
-        destination = output / label(key)
-        destination.mkdir(exist_ok=True)
+        message_label = label(key)
         for version in versions:
             try:
                 payloads = xml_payloads(client.logged_bytes(key, version))
                 for index, content in enumerate(payloads, 1):
-                    path = destination / f"{label(version)}_{index:02}.xml"
-                    with path.open("xb") as handle:
-                        handle.write(content)
+                    save_xml(output, f"{message_label}_{label(version)}_{index:02}", content)
                     saved += 1
                 print(f"{key} | {version}: saved {len(payloads)} XML part(s).")
             except (DownloadError, OSError, URLError, TimeoutError) as exc:
@@ -294,7 +317,7 @@ def main():
     parser.add_argument("--from", dest="start", required=True, type=timestamp)
     parser.add_argument("--to", dest="end", required=True, type=timestamp)
     parser.add_argument("--username", default=os.environ.get("SAP_PO_USERNAME"))
-    parser.add_argument("--output", type=Path, default=Path("payloads"))
+    parser.add_argument("--output", type=Path, help="Save directly to this folder without prompting.")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--ca-file", help="PEM CA certificate bundle; TLS verification stays enabled.")
     args = parser.parse_args()
@@ -309,11 +332,12 @@ def main():
         if url.query:
             parser.error("Supply either a base URL without a query or a direct SOAP endpoint.")
         args.url = args.url.rstrip("/") + "/AdapterMessageMonitoring/ssl?style=document"
-    username = args.username or input("SAP PO username: ").strip()
-    password = os.environ.get("SAP_PO_PASSWORD") or getpass.getpass("SAP PO password: ")
-    if not username or ":" in username or not password:
-        parser.error("Provide a username without ':' and a nonempty password.")
     try:
+        args.output = choose_output(args.output)
+        username = args.username or input("SAP PO username: ").strip()
+        password = os.environ.get("SAP_PO_PASSWORD") or getpass.getpass("SAP PO password: ")
+        if not username or ":" in username or not password:
+            parser.error("Provide a username without ':' and a nonempty password.")
         return export(Monitoring(args.url, username, password, args.ca_file), args)
     except (DownloadError, OSError, URLError, TimeoutError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
