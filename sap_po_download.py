@@ -20,7 +20,9 @@ are not exported. Staged and archived messages are not downloaded.
 Searches reaching --limit (default 100) stop before downloading: narrow the time
 range or explicitly increase the limit. There is no automatic pagination.
 When --output is omitted, enter a folder path or press Enter to use .\payloads.
-XML files are saved directly there as ScenarioName_yyyymmdd_hhmmss.xml,
+XML files are saved directly there as PairID_ScenarioName_yyyymmdd_hhmmss.xml,
+where PairID is the message's Reference ID if set, otherwise its Message ID, so
+a request and its related response share the same prefix. The timestamp is
 using the message's SAP PO startTime as returned, without timezone conversion.
 With --scenario-id, the ID is used in place of the name. If startTime is missing
 or invalid, the filename uses unknown-start. Collisions receive a numeric suffix.
@@ -316,7 +318,9 @@ def export(client, args):
             except ValueError:
                 print(f"WARNING: {key} has no valid startTime; using unknown-start.", file=sys.stderr)
                 stamp = "unknown-start"
-            stem = f"{scenario_stem}_{stamp}"
+            pair_id = (message.findtext(f"{{{DATA}}}referenceID", "").strip()
+                       or message.findtext(f"{{{DATA}}}messageID", "").strip() or key)
+            stem = f"{scenario_filename_stem(pair_id)}_{scenario_stem}_{stamp}"
             for content in payloads:
                 save_xml(output, stem, content)
                 saved += 1
