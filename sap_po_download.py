@@ -320,7 +320,7 @@ def export(client, args):
                 stamp = "unknown-start"
             pair_id = (message.findtext(f"{{{DATA}}}referenceID", "").strip()
                        or message.findtext(f"{{{DATA}}}messageID", "").strip() or key)
-            stem = f"{scenario_filename_stem(pair_id)}_{scenario_stem}_{stamp}"
+            stem = f"Msg{scenario_filename_stem(pair_id)}_{scenario_stem}_{stamp}"
             for content in payloads:
                 save_xml(output, stem, content)
                 saved += 1
