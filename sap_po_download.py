@@ -128,15 +128,18 @@ class Monitoring:
             raise DownloadError(f"{operation}: empty or unexpected SOAP response.")
         return result
 
-    def resolve_scenario_id(self, name):
+    def list_integration_flows(self):
+        """Return [(name, id), ...] for all integration flows (ICOs)."""
         root, operation = envelope("getIntegrationFlows")
         element(operation, OP, "language", "en")
         result = self.call("getIntegrationFlows", root)
-        matching_ids = {
-            (flow.findtext(f"{{{DATA}}}id") or "").strip()
+        return [
+            (flow.findtext(f"{{{DATA}}}name") or "", (flow.findtext(f"{{{DATA}}}id") or "").strip())
             for flow in result.findall(f"{{{DATA}}}IntegrationFlow")
-            if flow.findtext(f"{{{DATA}}}name") == name
-        }
+        ]
+
+    def resolve_scenario_id(self, name):
+        matching_ids = {flow_id for flow_name, flow_id in self.list_integration_flows() if flow_name == name}
         if not matching_ids:
             raise DownloadError(f"No integration flow named {name!r}. Use the exact ICO name returned by SAP PO.")
         if len(matching_ids) > 1:
@@ -265,6 +268,27 @@ def scenario_filename_stem(scenario_name):
     return stem or "scenario"
 
 
+def first_version(message):
+    return next((
+        item.text for item in message.findall(f"./{{{DATA}}}logLocations/{{{JAVA}}}String")
+        if item.text and item.text.strip()
+    ), None)
+
+
+def message_stem(message, scenario_stem):
+    """Filename stem (without extension) for a message; returns (stem, has_valid_start)."""
+    key = message.findtext(f"{{{DATA}}}messageKey")
+    start_time = message.findtext(f"{{{DATA}}}startTime", "").strip()
+    try:
+        date = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        stamp, valid = f"{date.year:04d}{date:%m%d_%H%M%S}", True
+    except ValueError:
+        stamp, valid = "unknown-start", False
+    pair_id = (message.findtext(f"{{{DATA}}}referenceID", "").strip()
+               or message.findtext(f"{{{DATA}}}messageID", "").strip() or key or "")
+    return f"Msg{scenario_filename_stem(pair_id)}_{scenario_stem}_{stamp}", valid
+
+
 def choose_output(output):
     if output is not None:
         return output
@@ -287,7 +311,7 @@ def save_xml(output, stem, content):
             continue
         with handle:
             handle.write(content)
-        return
+        return handle.name
 
 
 def export(client, args):
@@ -301,26 +325,16 @@ def export(client, args):
     failed, saved = 0, 0
     for message in messages:
         key = message.findtext(f"{{{DATA}}}messageKey")
-        version = next((
-            item.text for item in message.findall(f"./{{{DATA}}}logLocations/{{{JAVA}}}String")
-            if item.text and item.text.strip()
-        ), None)
+        version = first_version(message)
         if not key or not version:
             print(f"ERROR: message {key or '(no key)'} has no key/logged payload locations.", file=sys.stderr)
             failed += 1
             continue
         try:
             payloads = xml_payloads(client.logged_bytes(key, version))
-            start_time = message.findtext(f"{{{DATA}}}startTime", "").strip()
-            try:
-                date = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-                stamp = f"{date.year:04d}{date:%m%d_%H%M%S}"
-            except ValueError:
+            stem, valid = message_stem(message, scenario_stem)
+            if not valid:
                 print(f"WARNING: {key} has no valid startTime; using unknown-start.", file=sys.stderr)
-                stamp = "unknown-start"
-            pair_id = (message.findtext(f"{{{DATA}}}referenceID", "").strip()
-                       or message.findtext(f"{{{DATA}}}messageID", "").strip() or key)
-            stem = f"Msg{scenario_filename_stem(pair_id)}_{scenario_stem}_{stamp}"
             for content in payloads:
                 save_xml(output, stem, content)
                 saved += 1
