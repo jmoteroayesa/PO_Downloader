@@ -3,11 +3,12 @@
 ## 1. Goal
 A small tool that lets a user pick an ICO, search its messages by date/time and
 by payload content, and download the request/response XML files without using the
-Message Monitor UI.
+Message Monitor UI. It will save the user big time when there's several messages
+to download, since there is no auotmated option to do that.
 
 ## 2. Users
 - The users will be business analysts and ABAP Developers for the most part.
-- 2 or 3 users, 5 tops. Not all of them have tecnical knowledge, only one or may two including me.
+- 2 or 3 users, 5 tops. Not all of them have tecnical knowledge, only one or maybe two including me.
 
 ## 3. Starting point
 Existing script `sap_po_download.py` (Python, standard library only) that:
