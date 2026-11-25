@@ -1,15 +1,13 @@
-# SAP PO Message Explorer - Specification (DRAFT)
-
-> Items marked **[TBD]** need your decision. Edit freely.
+# SAP PO Message Explorer - Specification
 
 ## 1. Goal
 A small tool that lets a user pick an ICO, search its messages by date/time and
-by content, and download the request/response XML files without using the
+by payload content, and download the request/response XML files without using the
 Message Monitor UI.
 
 ## 2. Users
-- **[TBD]** Who uses it? (e.g. integration developers, support team, business analysts)
-- **[TBD]** Approximate number of users, and are they technical?
+- The users will be business analysts and ABAP Developers for the most part.
+- 2 or 3 users, 5 tops. Not all of them have tecnical knowledge, only one or may two including me.
 
 ## 3. Starting point
 Existing script `sap_po_download.py` (Python, standard library only) that:
@@ -30,22 +28,21 @@ The new tool must reuse this logic and keep this file naming.
 6. **Progress and cancel:** visible progress during searches and downloads, with a cancel button.
 
 ### Nice to have
-- Preview of the XML before saving.
+- Preview of the XML files before saving (optional).
 - Case-insensitive and XPath/regex search options.
 - Local cache of downloaded payloads, to avoid repeated downloads.
 - Export of the message list to CSV.
 
 ## 5. Non-functional requirements
-- **Security:** no passwords stored in plain text; credentials entered at runtime **[TBD: or Windows Credential Manager]**. TLS verification stays enabled (optional CA file).
-- **Authorization:** each user logs in with their own SAP credentials, so SAP access control still applies.
+- **Security:** credentials entered at runtime, but remember user selection
+- **Authorization:** each user logs in with their own PO credentials, so SAP access control still applies.
 - **Load on PO:** throttle requests; cap the number of messages per search (default 100, configurable).
-- **Sensitive data:** files are saved only where the user chooses; no payload content in logs.
-- **Platform:** **[TBD]** Windows desktop / internal web app.
-- **SAP PO version:** **[TBD]** (needed to confirm `getLoggedMessageBytes` support, SAP Note 2437778).
+- **Sensitive data:** no restriction
+- **Platform:**  internal web app
+- **SAP PO version:** 7.50 (needed to confirm `getLoggedMessageBytes` support, SAP Note 2437778).
 
 ## 6. Technology (proposal)
-Python with a UI layer: Streamlit (web) or Tkinter/PySide (desktop). **[TBD]**
-Optional packaging as a single `.exe` with PyInstaller.
+Python with a UI layer: Streamlit (web) or Tkinter/PySide (desktop). The first version will be web so Streamlit it is.
 
 ## 7. Content search behavior
 - SAP's filter works on metadata, not payload, so content search is done locally:
@@ -53,7 +50,7 @@ Optional packaging as a single `.exe` with PyInstaller.
   2. Download each message's payload.
   3. Keep those that contain the search text.
 - Only retained (logged) payloads can be searched.
-- **[TBD]** Is SAP's built-in payload search enabled on your system? If so, it could replace the local approach.
+- SAP's built-in payload search is enabled on the system. It could replace the local approach.
 
 ## 8. Limits and edge cases
 - The search stops when it reaches the limit (no pagination); the UI should split large date ranges.
@@ -73,6 +70,6 @@ Optional packaging as a single `.exe` with PyInstaller.
 - Non-XML payloads (JSON, binary).
 
 ## 11. Open questions
-- Typical message volume per ICO per day?
-- Is the tool allowed to run on a shared server, or only on user PCs?
-- Should the file naming be configurable?
+- Typical message volume per ICO per day? Very variable, depends on the specific scenario but the user will narrow it down using date/time input.
+- Is the tool allowed to run on a shared server, or only on user PCs? Only on user PC
+- Should the file naming be configurable? Not for the moment
